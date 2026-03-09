@@ -254,7 +254,7 @@ void drawManualControlMenu(){
   display.setTextColor(1); //white
   display.clearDisplay();
   display.setCursor(8, 8);
-  display.print(F("Joystick Control"));
+  display.print(F("Joystick Ctrl"));
   display.setCursor(8, 16+8);
   display.print(F("Back"));
   display.display();
