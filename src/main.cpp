@@ -44,22 +44,40 @@
 #define SCREEN_ADDRESS 0x3C
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-EncoderButton eb1(18,19,3);
-// Create one or more callback functions 
+EncoderButton eb1(ENCA, ENCB, ENCSW);
+
+// Forward declaration
+void ArrowPos(uint8_t position);
 
 
 uint8_t cursorPosition = 0;
+const uint8_t MENU_ITEMS = 3;  // number of items in the current menu
+bool menuPressed = false;       // set true when encoder button is clicked
+bool isHomed = false;
+bool backFlag = false;
+uint8_t currentMenu = 0;
+uint32_t linearDistanceRaw = 0;
+float linearDistanceMM = 0;
+uint16_t rotationDistance = 0;
 
 void onEb1Clicked(EncoderButton& eb) {
-  Serial.print("eb1 clickCount: ");
-  Serial.println(eb.clickCount());
+  menuPressed = true;  // caller checks this flag to act on the selected item
+  Serial.println("Encoder Button Clicked!");
 }
 
 void onEb1Encoder(EncoderButton& eb) {
-  Serial.print("eb1 incremented by: ");
-  Serial.println(eb.increment());
-  Serial.print("eb1 position is: ");
-  Serial.println(eb.position());
+  int8_t delta = eb.increment();
+  int8_t newPos = (int8_t)cursorPosition + delta;
+  
+  // Decide limit based on current menu
+  uint8_t limit = (currentMenu == 0) ? 3 : 3; // Both currently have 3 items
+  
+  if (newPos < 0) newPos = 0;
+  if (newPos >= limit) newPos = limit - 1;
+  
+  if (newPos != (int8_t)cursorPosition) {
+    ArrowPos((uint8_t)newPos);
+  }
 }
 
 //Set step size for 
@@ -223,6 +241,85 @@ void drawHomeMenu(){
   display.display();
 }
 
+void HomeAxis(){
+  //move linear in opposite direction for a few steps, then move towards home until it hits the interrupt homing microswitch.
+  stepSize(fullStep, 1); //not sure on driver number yet
+  callStep(1,0,100); //not sure on driver or direction yet
+}
+
+void drawManualControlMenu(){
+  currentMenu = 1;      
+  cursorPosition = 0;
+  backFlag = false;
+  display.setTextColor(1); //white
+  display.clearDisplay();
+  display.setCursor(8, 8);
+  display.print(F("Joystick Control"));
+  display.setCursor(8, 16+8);
+  display.print(F("Back"));
+  display.display();
+  ArrowPos(0); // Draw initial arrow for this menu
+}
+
+void joyCTRL(){
+  display.setCursor(8,8);
+  display.fillRect(8,8,100,7,1);
+  display.setTextColor(0);
+  display.print(F("Joystick Ctrl"));
+  bool exitCTRL = false;
+  while (!exitCTRL) {
+    int xVal = analogRead(vrx);
+    int yVal = analogRead(vry);
+
+    Serial.println("Joy X: ");
+    Serial.println(xVal);
+    Serial.println("Joy Y:");
+    Serial.println(yVal);
+
+    //TODO: motor logic - use vrx for linear axis, and vry for rotation,  with expo curved inputs
+    //TODO: update linear and rotation distance variables and calculate mm and degrees using algorithm in a seperate function (real testing rq)
+    //TODO: then display distances on UI
+
+    if (digitalRead(jsw) == LOW)
+    {
+      delay(200);
+      drawManualControlMenu();
+      exitCTRL = true;
+    }
+  }
+  return;
+}
+
+void manualControlMenu(){
+  drawManualControlMenu();
+  
+  while (!backFlag) {
+    eb1.update(); // Keep library heartbeat alive
+    
+    if (menuPressed) {  
+      menuPressed = false;
+      if (cursorPosition == 0) {
+        joyCTRL();
+      }
+      else if(cursorPosition == 1) {
+        backFlag = true;
+      }
+    }
+  }
+  // Returning to main menu
+  currentMenu = 0;
+  drawHomeMenu();
+  ArrowPos(0);
+}
+
+
+
+
+
+
+
+void RecordMacroMenu(){}
+
 void setup() {
   pinMode(vrx, INPUT);
   pinMode(vry, INPUT);
@@ -237,7 +334,7 @@ void setup() {
   delay(100);
   eb1.setClickHandler(onEb1Clicked);
   eb1.setEncoderHandler(onEb1Encoder);
-  
+
   drawHomeMenu();
   ArrowPos(0);
   
@@ -247,6 +344,19 @@ void setup() {
 
 void loop() {
   eb1.update();
+
+  if (menuPressed) {
+    menuPressed = false;
+    switch (cursorPosition) {
+      case 0: HomeAxis(); Serial.println("Home Axis Pressed");
+        break;
+      case 1: manualControlMenu(); Serial.println("Axes Control Pressed");
+        break;
+      case 2: RecordMacroMenu(); Serial.println("Record Macro pressed");
+        break;
+    }
+  }
+
 }
 
 
