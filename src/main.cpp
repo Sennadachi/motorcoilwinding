@@ -2,12 +2,17 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
+#include <EncoderButton.h>
+
 #define vrx A0 //Joystick pot x
 #define vry A1 //Joystick pot y
 #define jsw A2 //Joystick switch
 #define SDA 20 //I2C data pin
 #define SCL 21 //I2C clock pin
 #define HOMESWITCH 2 //interrupt for homing axis
+#define ENCA 18
+#define ENCB 19
+#define ENCSW 3
 
 //2 sparkfun big easy drivers
 #define DR_1 53 //Direction 1
@@ -39,10 +44,27 @@
 #define SCREEN_ADDRESS 0x3C
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+EncoderButton eb1(18,19,3);
+// Create one or more callback functions 
+
+
+uint8_t cursorPosition = 0;
+
+void onEb1Clicked(EncoderButton& eb) {
+  Serial.print("eb1 clickCount: ");
+  Serial.println(eb.clickCount());
+}
+
+void onEb1Encoder(EncoderButton& eb) {
+  Serial.print("eb1 incremented by: ");
+  Serial.println(eb.increment());
+  Serial.print("eb1 position is: ");
+  Serial.println(eb.position());
+}
 
 //Set step size for 
-void stepSize(bool driver, uint8_t stepSize) {
-  switch (stepSize, driver)
+void stepSize(uint8_t stepSize, bool driver) {
+  switch (stepSize)
   {
   case 0:
     if(driver) {
@@ -121,7 +143,7 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
   {
     digitalWrite(EN_2, LOW);
 
-    if (direction == 1) {
+    if (direction) {
       digitalWrite(DR_2, HIGH);
     }
     else {
@@ -139,7 +161,7 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
   {
     digitalWrite(EN_1, LOW);
 
-    if (direction == 1) {
+    if (direction) {
       digitalWrite(DR_1, HIGH);
     }
     else {
@@ -155,6 +177,52 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
   }  
 }
 
+void ArrowPos(uint8_t position) {
+  display.setTextSize(1);
+  display.setTextColor(1);
+  display.fillRect(100,0,28,64,SSD1306_BLACK);
+  display.display();
+  switch (position) {
+    case 0:
+      display.setCursor(100, 0+8); //8 offset
+      display.print(F("<--"));
+      cursorPosition = 0;
+    break;
+    case 1:
+      display.setCursor(100, 16+8);
+      display.print(F("<--"));
+      cursorPosition= 1;
+    break;
+    case 2:
+      display.setCursor(100, 32+8);
+      display.print(F("<--"));
+      cursorPosition = 2;
+    break;
+    case 3:
+      display.setCursor(100, 48+8);
+      display.print(F("<--"));
+      cursorPosition = 3;
+    break;
+    default:
+      return;
+    break;
+  }
+  display.display();
+}
+
+void drawHomeMenu(){
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(1);
+  display.setCursor(8, 8);
+  display.print(F("Home Axis"));
+  display.setCursor(8, 16+8);
+  display.print(F("Axes Control"));
+  display.setCursor(8, 32+8);
+  display.print(F("Record Macro"));
+  display.display();
+}
+
 void setup() {
   pinMode(vrx, INPUT);
   pinMode(vry, INPUT);
@@ -167,35 +235,18 @@ void setup() {
   delay(100);
   display.clearDisplay();
   delay(100);
+  eb1.setClickHandler(onEb1Clicked);
+  eb1.setEncoderHandler(onEb1Encoder);
+  
+  drawHomeMenu();
+  ArrowPos(0);
   
 }
 
-void OLEDArrowPosition(uint8_t position) {
-  switch (position) {
-    case 0:
-    display.setCursor(100,0);
-    break;
-    case 1:
-    display.setCursor(100,16);
-    break;
-    case 2:
-    display.setCursor(100,32);
-    case 3:
-    display.setCursor(100, 48);
 
-  }
-}
 
 void loop() {
-
-  display.clearDisplay();
-
-  display.setTextSize(1);
-  display.setCursor(1, (display.height()/2));
-  display.setTextColor(1);
-  display.println(F("Hello world"));
-  display.display();
-  delay(3000);
+  eb1.update();
 }
 
 
