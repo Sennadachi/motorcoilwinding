@@ -266,6 +266,7 @@ void joyCTRL(){
   display.fillRect(8,8,100,7,1);
   display.setTextColor(0);
   display.print(F("Joystick Ctrl"));
+  display.display();
   bool exitCTRL = false;
   while (!exitCTRL) {
     int xVal = analogRead(vrx);
@@ -276,7 +277,7 @@ void joyCTRL(){
     Serial.println("Joy Y:");
     Serial.println(yVal);
 
-    //TODO: motor logic - use vrx for linear axis, and vry for rotation,  with expo curved inputs
+    //TODO: motor logic - use vrx to drive linear axis, and vry for rotation,  with expo curved inputs when JoyCTRL is clicked with the encoder. Click the joystick switch jsw to exit the joystick control mode
     //TODO: update linear and rotation distance variables and calculate mm and degrees using algorithm in a seperate function (real testing rq)
     //TODO: then display distances on UI
 
