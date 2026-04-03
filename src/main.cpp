@@ -553,6 +553,7 @@ void setup() {
   pinMode(vrx, INPUT);
   pinMode(vry, INPUT);
   pinMode(jsw, INPUT_PULLUP);
+  pinMode(HOMESWITCH, INPUT_PULLUP);
 
   for(int i = 42; i<54; i++) {
     pinMode(i, OUTPUT);
