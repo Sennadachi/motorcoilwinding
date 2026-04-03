@@ -8,9 +8,9 @@
 Checklist:
   TODO: Check Menus work
   TODO: check motors work and figure out directions
-  TODO: Sort Joystick control out and apply expo curve for precise control
-  TODO: Figure out linear distance vs raw motor input
-  TODO: Figure out Rotation degrees vs raw rotation
+  TODO: Sort Joystick control out and apply expo curve for precise control 
+  TODO: Figure out linear distance vs raw motor input 1880 steps = 37.5mm
+  TODO: Figure out Rotation degrees vs raw rotation 600 = 360 degrees
   TODO: Display real values on-screen
   TODO: Set up homing feature and make zeroing function
   TODO: Set up record macro feature
@@ -85,6 +85,9 @@ void enterMenu(const MenuDefinition* menu);
 MenuItem createBackMenuItem();
 void updateJoystickCtrl();
 void drawJoystickCtrlScreen();
+void drawJoystickDebugReadout();
+float rawLinearToMM(int32_t rawSixteenthUnits);
+int16_t rawRotationToDegrees(int32_t rawSixteenthUnits);
 void actionHomeAxis();
 void actionOpenManualMenu();
 void actionRecordMacro();
@@ -144,12 +147,17 @@ SystemState currentState = STATE_MAIN_MENU;
 bool menuPressed = false;       // set true when encoder button is clicked
 bool isHomed = false;
 bool menuNeedsRedraw = true;
-uint32_t linearDistanceRaw = 0;
+int32_t linearDistanceRaw = 0;
 float linearDistanceMM = 0;
-uint16_t rotationDistance = 0;
+int32_t rotationDistanceRaw = 0;
+int16_t rotationDistance = 0;
+int32_t joystickLinearFullStepEqFromStart = 0;
+int32_t joystickRotationFullStepEqFromStart = 0;
 bool joystickSwitchState = HIGH;
 uint32_t joystickSwitchLastEdgeMs = 0;
 const uint16_t JOY_SWITCH_DEBOUNCE_MS = 40;
+const float LINEAR_MM_PER_FULL_STEP = 37.5f / 1880.0f;
+const float ROTATION_DEG_PER_FULL_STEP = 360.0f / 600.0f;
 
 void onEb1Clicked(EncoderButton& eb) {
   menuPressed = true;  // caller checks this flag to act on the selected item
@@ -342,6 +350,27 @@ void drawJoystickCtrlScreen() {
   display.display();
 }
 
+void drawJoystickDebugReadout() {
+  display.fillRect(8, 24, 112, 28, SSD1306_BLACK);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(8, 26);
+  display.print(F("Lin mm: "));
+  display.print(linearDistanceMM, 2);
+  display.setCursor(8, 40);
+  display.print(F("Rot deg: "));
+  display.print(rotationDistance);
+  display.display();
+}
+
+float rawLinearToMM(int32_t rawSixteenthUnits) {
+  return ((float)rawSixteenthUnits / 16.0f) * LINEAR_MM_PER_FULL_STEP;
+}
+
+int16_t rawRotationToDegrees(int32_t rawSixteenthUnits) {
+  float degrees = ((float)rawSixteenthUnits / 16.0f) * ROTATION_DEG_PER_FULL_STEP;
+  return (int16_t)lroundf(degrees);
+}
+
 void updateJoystickCtrl() {
   int xVal = analogRead(vrx);
   int yVal = analogRead(vry);
@@ -393,13 +422,29 @@ void updateJoystickCtrl() {
   uint8_t linearMode = axisToStepMode(xOffset);
   uint8_t rotationMode = axisToStepMode(yOffset);
 
+  auto modeToSixteenthPerPulse = [&](uint8_t mode) -> int32_t {
+    switch (mode) {
+      case fullStep: return 16;
+      case halfStep: return 8;
+      case quarterStep: return 4;
+      case eightStep: return 2;
+      case sixteenthStep: return 1;
+      default: return 16;
+    }
+  };
+
+  int32_t linearUnitsPerPulse = modeToSixteenthPerPulse(linearMode);
+  int32_t rotationUnitsPerPulse = modeToSixteenthPerPulse(rotationMode);
+
   // Joy X: toward 0 => linear right, toward 1024 => linear left.
   if (linearSteps > 0) {
     stepSize(linearMode, 1);
     if (xOffset < 0) {
       callStep(1, 0, linearSteps);
+      joystickLinearFullStepEqFromStart += ((int32_t)linearSteps * linearUnitsPerPulse);
     } else {
       callStep(1, 1, linearSteps);
+      joystickLinearFullStepEqFromStart -= ((int32_t)linearSteps * linearUnitsPerPulse);
     }
   }
 
@@ -408,10 +453,19 @@ void updateJoystickCtrl() {
     stepSize(rotationMode, 0);
     if (yOffset < 0) {
       callStep(0, 0, rotationSteps);
+      joystickRotationFullStepEqFromStart += ((int32_t)rotationSteps * rotationUnitsPerPulse);
     } else {
       callStep(0, 1, rotationSteps);
+      joystickRotationFullStepEqFromStart -= ((int32_t)rotationSteps * rotationUnitsPerPulse);
     }
   }
+
+  linearDistanceRaw = joystickLinearFullStepEqFromStart;
+  rotationDistanceRaw = joystickRotationFullStepEqFromStart;
+  linearDistanceMM = rawLinearToMM(linearDistanceRaw);
+  rotationDistance = rawRotationToDegrees(rotationDistanceRaw);
+
+  drawJoystickDebugReadout();
 
   bool jsStateNow = digitalRead(jsw);
   uint32_t nowMs = millis();
@@ -454,10 +508,13 @@ void actionEnterJoystickCtrl() {
   joystickReturnMenuDef = activeMenuDef;
   joystickSwitchState = digitalRead(jsw);
   joystickSwitchLastEdgeMs = millis();
+  joystickLinearFullStepEqFromStart = 0;
+  joystickRotationFullStepEqFromStart = 0;
   stepSize(fullStep, 0);
   stepSize(fullStep, 1);
   currentState = STATE_JOYSTICK_CTRL;
   drawJoystickCtrlScreen();
+  drawJoystickDebugReadout();
 }
 
 void testMotors() {
@@ -496,6 +553,7 @@ void setup() {
   pinMode(vrx, INPUT);
   pinMode(vry, INPUT);
   pinMode(jsw, INPUT_PULLUP);
+  pinMode(HOMESWITCH, INPUT_PULLUP);
 
   for(int i = 42; i<54; i++) {
     pinMode(i, OUTPUT);
