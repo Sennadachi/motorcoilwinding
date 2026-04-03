@@ -13,7 +13,8 @@ Checklist:
   TODO: Figure out Rotation degrees vs raw rotation 600 = 360 degrees
   TODO: Display real values on-screen
   TODO: Set up homing feature and make zeroing function
-  TODO: Set up record macro feature
+  TODO: Set up rotation counter
+  TODO: Set up record macro feature <--
 
 */
 
@@ -151,6 +152,8 @@ int32_t linearDistanceRaw = 0;
 float linearDistanceMM = 0;
 int32_t rotationDistanceRaw = 0;
 int16_t rotationDistance = 0;
+uint32_t rotationTurnCount = 0;
+uint32_t rotationAbsRemainderRaw = 0;
 int32_t joystickLinearFullStepEqFromStart = 0;
 int32_t joystickRotationFullStepEqFromStart = 0;
 bool joystickSwitchState = HIGH;
@@ -158,6 +161,17 @@ uint32_t joystickSwitchLastEdgeMs = 0;
 const uint16_t JOY_SWITCH_DEBOUNCE_MS = 40;
 const float LINEAR_MM_PER_FULL_STEP = 37.5f / 1880.0f;
 const float ROTATION_DEG_PER_FULL_STEP = 360.0f / 600.0f;
+const uint32_t ROTATION_RAW_UNITS_PER_REV = 600UL * 16UL;
+const uint32_t HOME_SWITCH_ISR_DEBOUNCE_US = 3000;
+
+volatile bool linearStopRequested = false;
+volatile bool homeSwitchTriggered = false;
+volatile bool homeZeroRequested = false;
+volatile bool homingProcedureActive = false;
+volatile uint32_t homeSwitchLastIsrUs = 0;
+
+void onHomeSwitchChange();
+void processHomeSwitchEvents();
 
 void onEb1Clicked(EncoderButton& eb) {
   menuPressed = true;  // caller checks this flag to act on the selected item
@@ -174,6 +188,41 @@ void onEb1Encoder(EncoderButton& eb) {
   
   if (newPos != (int8_t)cursorPosition) {
     ArrowPos((uint8_t)newPos);
+  }
+}
+
+void onHomeSwitchChange() {
+  uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - homeSwitchLastIsrUs) < HOME_SWITCH_ISR_DEBOUNCE_US) {
+    return;
+  }
+
+  if (digitalRead(HOMESWITCH) == LOW) {
+    homeSwitchLastIsrUs = nowUs;
+    homeSwitchTriggered = true;
+    linearStopRequested = true;
+    if (homingProcedureActive) {
+      homeZeroRequested = true;
+    }
+  }
+}
+
+void processHomeSwitchEvents() {
+  bool doZero = false;
+
+  noInterrupts();
+  if (homeZeroRequested) {
+    homeZeroRequested = false;
+    doZero = true;
+  }
+  interrupts();
+
+  if (doZero) {
+    joystickLinearFullStepEqFromStart = 0;
+    linearDistanceRaw = 0;
+    linearDistanceMM = 0.0f;
+    isHomed = true;
+    Serial.println("Home switch hit during homing. Linear position set to zero.");
   }
 }
 
@@ -266,10 +315,17 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
     }
 
     for(uint32_t i = 0; i < Steps; i++) {
+      if (linearStopRequested) {
+        break;
+      }
       digitalWrite(ST_2, HIGH);
       delay(1);
       digitalWrite(ST_2, LOW);
       delay(1);
+    }
+
+    if (linearStopRequested) {
+      digitalWrite(EN_2, HIGH);
     }
   }
   else
@@ -330,9 +386,37 @@ MenuItem createBackMenuItem() {
 }
 
 void HomeAxis(){
-  //move linear in opposite direction for a few steps, then move towards home until it hits the interrupt homing microswitch.
-  stepSize(fullStep, 1); //not sure on driver number yet
-  callStep(1,0,100); //not sure on driver or direction yet
+  // Move off the switch slightly, then move towards home until ISR requests stop.
+  noInterrupts();
+  homingProcedureActive = true;
+  linearStopRequested = false;
+  homeSwitchTriggered = false;
+  homeZeroRequested = false;
+  interrupts();
+
+  // Reset rotation turn count when homing is requested.
+  rotationTurnCount = 0;
+  rotationAbsRemainderRaw = 0;
+
+  stepSize(fullStep, 1);
+
+  // Back off first.
+  callStep(1, 0, 100);
+
+  // Seek home switch and stop immediately when ISR latches LOW.
+  for (uint32_t i = 0; i < 60000; i++) {
+    if (linearStopRequested) {
+      break;
+    }
+    callStep(1, 1, 1);
+  }
+
+  noInterrupts();
+  homingProcedureActive = false;
+  linearStopRequested = false;
+  interrupts();
+
+  processHomeSwitchEvents();
 }
 
 void drawJoystickCtrlScreen() {
@@ -351,14 +435,17 @@ void drawJoystickCtrlScreen() {
 }
 
 void drawJoystickDebugReadout() {
-  display.fillRect(8, 24, 112, 28, SSD1306_BLACK);
+  display.fillRect(8, 22, 112, 34, SSD1306_BLACK);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(8, 26);
+  display.setCursor(8, 24);
   display.print(F("Lin mm: "));
   display.print(linearDistanceMM, 2);
-  display.setCursor(8, 40);
+  display.setCursor(8, 36);
   display.print(F("Rot deg: "));
   display.print(rotationDistance);
+  display.setCursor(8, 48);
+  display.print(F("Rot cnt: "));
+  display.print(rotationTurnCount);
   display.display();
 }
 
@@ -451,6 +538,13 @@ void updateJoystickCtrl() {
   // Joy Y: toward 0 => anticlockwise, toward 1024 => clockwise.
   if (rotationSteps > 0) {
     stepSize(rotationMode, 0);
+    uint32_t rotationDeltaAbsRaw = (uint32_t)rotationSteps * (uint32_t)rotationUnitsPerPulse;
+    rotationAbsRemainderRaw += rotationDeltaAbsRaw;
+    while (rotationAbsRemainderRaw >= ROTATION_RAW_UNITS_PER_REV) {
+      rotationAbsRemainderRaw -= ROTATION_RAW_UNITS_PER_REV;
+      rotationTurnCount++;
+    }
+
     if (yOffset < 0) {
       callStep(0, 0, rotationSteps);
       joystickRotationFullStepEqFromStart += ((int32_t)rotationSteps * rotationUnitsPerPulse);
@@ -571,6 +665,7 @@ void setup() {
   delay(100);
   eb1.setClickHandler(onEb1Clicked);
   eb1.setEncoderHandler(onEb1Encoder);
+  attachInterrupt(digitalPinToInterrupt(HOMESWITCH), onHomeSwitchChange, CHANGE);
   joystickSwitchState = digitalRead(jsw);
   joystickSwitchLastEdgeMs = millis();
 
@@ -584,6 +679,7 @@ void setup() {
 
 
 void loop() {
+  processHomeSwitchEvents();
   eb1.update();
 
   if (currentState == STATE_JOYSTICK_CTRL) {
