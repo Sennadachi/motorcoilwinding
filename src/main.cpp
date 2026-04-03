@@ -100,11 +100,13 @@ void actionGoBack();
 void HomeAxis();
 void RecordMacroMenu();
 void PlayMacro();
+void beginMacroRecording();
+void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMode);
 
 MenuItem mainMenu[] = {
   {"Home Axis", actionHomeAxis},
   {"Axes Control", actionOpenManualMenu},
-  {"Record Macro", actionRecordMacro},
+  {"Macros", actionRecordMacro},
   {"Test Motors", actionTestMotors}
 };
 
@@ -170,6 +172,20 @@ volatile bool homeZeroRequested = false;
 volatile bool homingProcedureActive = false;
 volatile uint32_t homeSwitchLastIsrUs = 0;
 
+const uint16_t MAX_MACRO_MOVES = 1200;
+
+struct MacroMove {
+  bool driver;
+  bool direction;
+  uint32_t steps;
+  uint8_t stepMode;
+};
+
+MacroMove recordedMacro[MAX_MACRO_MOVES];
+uint16_t recordedMacroCount = 0;
+bool macroRecordingActive = false;
+bool macroRecordingOverflow = false;
+
 void onHomeSwitchChange();
 void processHomeSwitchEvents();
 
@@ -224,6 +240,41 @@ void processHomeSwitchEvents() {
     isHomed = true;
     Serial.println("Home switch hit during homing. Linear position set to zero.");
   }
+}
+
+void beginMacroRecording() {
+  recordedMacroCount = 0;
+  macroRecordingOverflow = false;
+  macroRecordingActive = true;
+  Serial.println("Macro recording started. Use joystick, then press joystick button to stop.");
+
+  joystickReturnMenuDef = &recordMacroMenuDef;
+  joystickSwitchState = digitalRead(jsw);
+  joystickSwitchLastEdgeMs = millis();
+  joystickLinearFullStepEqFromStart = 0;
+  joystickRotationFullStepEqFromStart = 0;
+  stepSize(fullStep, 0);
+  stepSize(fullStep, 1);
+  currentState = STATE_JOYSTICK_CTRL;
+  drawJoystickCtrlScreen();
+  drawJoystickDebugReadout();
+}
+
+void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMode) {
+  if (!macroRecordingActive || steps == 0) {
+    return;
+  }
+
+  if (recordedMacroCount >= MAX_MACRO_MOVES) {
+    macroRecordingOverflow = true;
+    return;
+  }
+
+  recordedMacro[recordedMacroCount].driver = driver;
+  recordedMacro[recordedMacroCount].direction = direction;
+  recordedMacro[recordedMacroCount].steps = steps;
+  recordedMacro[recordedMacroCount].stepMode = stepMode;
+  recordedMacroCount++;
 }
 
 //Set step size for 
@@ -429,6 +480,10 @@ void drawJoystickCtrlScreen() {
   display.print(F("Joystick Ctrl"));
 
   display.setTextColor(SSD1306_WHITE);
+  if (macroRecordingActive) {
+    display.setCursor(8, 20);
+    display.print(F("REC"));
+  }
   display.setCursor(8, 56);
   display.print(F("Press Joy to exit"));
   display.display();
@@ -527,9 +582,11 @@ void updateJoystickCtrl() {
   if (linearSteps > 0) {
     stepSize(linearMode, 1);
     if (xOffset < 0) {
+      recordMacroMove(1, 0, linearSteps, linearMode);
       callStep(1, 0, linearSteps);
       joystickLinearFullStepEqFromStart += ((int32_t)linearSteps * linearUnitsPerPulse);
     } else {
+      recordMacroMove(1, 1, linearSteps, linearMode);
       callStep(1, 1, linearSteps);
       joystickLinearFullStepEqFromStart -= ((int32_t)linearSteps * linearUnitsPerPulse);
     }
@@ -546,9 +603,11 @@ void updateJoystickCtrl() {
     }
 
     if (yOffset < 0) {
+      recordMacroMove(0, 0, rotationSteps, rotationMode);
       callStep(0, 0, rotationSteps);
       joystickRotationFullStepEqFromStart += ((int32_t)rotationSteps * rotationUnitsPerPulse);
     } else {
+      recordMacroMove(0, 1, rotationSteps, rotationMode);
       callStep(0, 1, rotationSteps);
       joystickRotationFullStepEqFromStart -= ((int32_t)rotationSteps * rotationUnitsPerPulse);
     }
@@ -576,6 +635,15 @@ void updateJoystickCtrl() {
   }
 
   if (exitPressed) {
+    if (macroRecordingActive) {
+      macroRecordingActive = false;
+      if (macroRecordingOverflow) {
+        Serial.print("Macro recording stopped (buffer full). Moves saved: ");
+      } else {
+        Serial.print("Macro recording stopped. Moves saved: ");
+      }
+      Serial.println(recordedMacroCount);
+    }
     enterMenu(joystickReturnMenuDef);
   }
 }
@@ -636,11 +704,73 @@ void actionGoBack() {
 
 
 void RecordMacroMenu() {
-  Serial.println("Start macro recording requested");
+  beginMacroRecording();
 }
 
 void PlayMacro() {
-  Serial.println("Play macro requested");
+  if (macroRecordingActive) {
+    Serial.println("Cannot play while recording is active.");
+    return;
+  }
+
+  if (recordedMacroCount == 0) {
+    Serial.println("No recorded macro to play.");
+    return;
+  }
+
+  Serial.print("Playing macro. Moves: ");
+  Serial.println(recordedMacroCount);
+
+  for (uint16_t i = 0; i < recordedMacroCount; i++) {
+    if (linearStopRequested) {
+      Serial.println("Macro playback stopped by home switch event.");
+      break;
+    }
+
+    const MacroMove& move = recordedMacro[i];
+    stepSize(move.stepMode, move.driver);
+    callStep(move.driver, move.direction, move.steps);
+
+    int32_t unitsPerPulse = 16;
+    switch (move.stepMode) {
+      case fullStep: unitsPerPulse = 16; break;
+      case halfStep: unitsPerPulse = 8; break;
+      case quarterStep: unitsPerPulse = 4; break;
+      case eightStep: unitsPerPulse = 2; break;
+      case sixteenthStep: unitsPerPulse = 1; break;
+      default: unitsPerPulse = 16; break;
+    }
+
+    int32_t deltaRaw = (int32_t)move.steps * unitsPerPulse;
+
+    if (move.driver) {
+      if (move.direction == 0) {
+        joystickLinearFullStepEqFromStart += deltaRaw;
+      } else {
+        joystickLinearFullStepEqFromStart -= deltaRaw;
+      }
+    } else {
+      uint32_t rotationDeltaAbsRaw = (uint32_t)deltaRaw;
+      rotationAbsRemainderRaw += rotationDeltaAbsRaw;
+      while (rotationAbsRemainderRaw >= ROTATION_RAW_UNITS_PER_REV) {
+        rotationAbsRemainderRaw -= ROTATION_RAW_UNITS_PER_REV;
+        rotationTurnCount++;
+      }
+
+      if (move.direction == 0) {
+        joystickRotationFullStepEqFromStart += deltaRaw;
+      } else {
+        joystickRotationFullStepEqFromStart -= deltaRaw;
+      }
+    }
+  }
+
+  linearDistanceRaw = joystickLinearFullStepEqFromStart;
+  rotationDistanceRaw = joystickRotationFullStepEqFromStart;
+  linearDistanceMM = rawLinearToMM(linearDistanceRaw);
+  rotationDistance = rawRotationToDegrees(rotationDistanceRaw);
+
+  Serial.println("Macro playback finished.");
 }
 
 void setup() {
