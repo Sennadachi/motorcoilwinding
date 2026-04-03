@@ -7,7 +7,7 @@
 /*
 Checklist:
   TODO: Check Menus work
-  TODO: check motors work and figure out directions <--
+  TODO: check motors work and figure out directions
   TODO: Sort Joystick control out and apply expo curve for precise control
   TODO: Figure out linear distance vs raw motor input
   TODO: Figure out Rotation degrees vs raw rotation
@@ -346,14 +346,72 @@ void updateJoystickCtrl() {
   int xVal = analogRead(vrx);
   int yVal = analogRead(vry);
 
-  Serial.println("Joy X: ");
-  Serial.println(xVal);
-  Serial.println("Joy Y:");
-  Serial.println(yVal);
+  const int16_t joyCenter = 512;
+  const int16_t deadzone = 45;
+  const uint8_t maxStepsPerUpdate = 12;
 
-  //TODO: motor logic - use vrx to drive linear axis, and vry for rotation,  with expo curved inputs when JoyCTRL is clicked with the encoder. Click the joystick switch jsw to exit the joystick control mode
-  //TODO: update linear and rotation distance variables and calculate mm and degrees using algorithm in a seperate function (real testing rq)
-  //TODO: then display distances on UI
+  auto axisToSteps = [&](int16_t axisOffset) -> uint32_t {
+    int16_t absOffset = abs(axisOffset);
+    if (absOffset <= deadzone) {
+      return 0;
+    }
+
+    float normalized = (float)(absOffset - deadzone) / (float)(511 - deadzone);
+    if (normalized > 1.0f) {
+      normalized = 1.0f;
+    }
+
+    // Near-linear feel with gentle acceleration at the very end of travel.
+    float curved = (0.85f * normalized) + (0.15f * normalized * normalized * normalized);
+    return 1 + (uint32_t)(curved * (maxStepsPerUpdate - 1));
+  };
+
+  auto axisToStepMode = [&](int16_t axisOffset) -> uint8_t {
+    int16_t absOffset = abs(axisOffset);
+    if (absOffset <= deadzone) {
+      return sixteenthStep;
+    }
+
+    float normalized = (float)(absOffset - deadzone) / (float)(511 - deadzone);
+    if (normalized > 1.0f) {
+      normalized = 1.0f;
+    }
+
+    // Keep fine control over almost all travel; reserve full-step for extremes.
+    if (normalized < 0.68f) return sixteenthStep;
+    if (normalized < 0.86f) return eightStep;
+    if (normalized < 0.94f) return quarterStep;
+    if (normalized < 0.98f) return halfStep;
+    return fullStep;
+  };
+
+  int16_t xOffset = xVal - joyCenter;
+  int16_t yOffset = yVal - joyCenter;
+
+  uint32_t linearSteps = axisToSteps(xOffset);
+  uint32_t rotationSteps = axisToSteps(yOffset);
+  uint8_t linearMode = axisToStepMode(xOffset);
+  uint8_t rotationMode = axisToStepMode(yOffset);
+
+  // Joy X: toward 0 => linear right, toward 1024 => linear left.
+  if (linearSteps > 0) {
+    stepSize(linearMode, 1);
+    if (xOffset < 0) {
+      callStep(1, 0, linearSteps);
+    } else {
+      callStep(1, 1, linearSteps);
+    }
+  }
+
+  // Joy Y: toward 0 => anticlockwise, toward 1024 => clockwise.
+  if (rotationSteps > 0) {
+    stepSize(rotationMode, 0);
+    if (yOffset < 0) {
+      callStep(0, 0, rotationSteps);
+    } else {
+      callStep(0, 1, rotationSteps);
+    }
+  }
 
   bool jsStateNow = digitalRead(jsw);
   uint32_t nowMs = millis();
@@ -396,6 +454,8 @@ void actionEnterJoystickCtrl() {
   joystickReturnMenuDef = activeMenuDef;
   joystickSwitchState = digitalRead(jsw);
   joystickSwitchLastEdgeMs = millis();
+  stepSize(fullStep, 0);
+  stepSize(fullStep, 1);
   currentState = STATE_JOYSTICK_CTRL;
   drawJoystickCtrlScreen();
 }
