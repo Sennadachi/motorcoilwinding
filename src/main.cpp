@@ -165,14 +165,17 @@ const float LINEAR_MM_PER_FULL_STEP = 37.5f / 1880.0f;
 const float ROTATION_DEG_PER_FULL_STEP = 360.0f / 600.0f;
 const uint32_t ROTATION_RAW_UNITS_PER_REV = 600UL * 16UL;
 const uint32_t HOME_SWITCH_ISR_DEBOUNCE_US = 3000;
+const uint16_t MACRO_PLAYBACK_PULSE_DELAY_MS = 3;
+const uint16_t MACRO_PLAYBACK_BETWEEN_MOVES_MS = 8;
+const uint16_t MACRO_NEAR_LIMIT_MARGIN = 20;
 
 volatile bool linearStopRequested = false;
 volatile bool homeSwitchTriggered = false;
-volatile bool homeZeroRequested = false;
+volatile bool homeZ1eroRequested = false;
 volatile bool homingProcedureActive = false;
 volatile uint32_t homeSwitchLastIsrUs = 0;
 
-const uint16_t MAX_MACRO_MOVES = 1200;
+const uint16_t MAX_MACRO_MOVES = 600;
 
 struct MacroMove {
   bool driver;
@@ -185,6 +188,9 @@ MacroMove recordedMacro[MAX_MACRO_MOVES];
 uint16_t recordedMacroCount = 0;
 bool macroRecordingActive = false;
 bool macroRecordingOverflow = false;
+bool macroNearLimitWarned = false;
+bool macroLimitHitLatched = false;
+bool macroStopByLimitRequested = false;
 
 void onHomeSwitchChange();
 void processHomeSwitchEvents();
@@ -242,42 +248,7 @@ void processHomeSwitchEvents() {
   }
 }
 
-void beginMacroRecording() {
-  recordedMacroCount = 0;
-  macroRecordingOverflow = false;
-  macroRecordingActive = true;
-  Serial.println("Macro recording started. Use joystick, then press joystick button to stop.");
-
-  joystickReturnMenuDef = &recordMacroMenuDef;
-  joystickSwitchState = digitalRead(jsw);
-  joystickSwitchLastEdgeMs = millis();
-  joystickLinearFullStepEqFromStart = 0;
-  joystickRotationFullStepEqFromStart = 0;
-  stepSize(fullStep, 0);
-  stepSize(fullStep, 1);
-  currentState = STATE_JOYSTICK_CTRL;
-  drawJoystickCtrlScreen();
-  drawJoystickDebugReadout();
-}
-
-void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMode) {
-  if (!macroRecordingActive || steps == 0) {
-    return;
-  }
-
-  if (recordedMacroCount >= MAX_MACRO_MOVES) {
-    macroRecordingOverflow = true;
-    return;
-  }
-
-  recordedMacro[recordedMacroCount].driver = driver;
-  recordedMacro[recordedMacroCount].direction = direction;
-  recordedMacro[recordedMacroCount].steps = steps;
-  recordedMacro[recordedMacroCount].stepMode = stepMode;
-  recordedMacroCount++;
-}
-
-//Set step size for 
+//Set step size for motor drivers
 void stepSize(uint8_t stepSize, bool driver) {
   switch (stepSize)
   {
@@ -352,8 +323,92 @@ void stepSize(uint8_t stepSize, bool driver) {
   }
 }
 
+void beginMacroRecording() {
+  recordedMacroCount = 0;
+  macroRecordingOverflow = false;
+  macroRecordingActive = true;
+  macroNearLimitWarned = false;
+  macroLimitHitLatched = false;
+  macroStopByLimitRequested = false;
+  Serial.println("Macro recording started. Use joystick, then press joystick button to stop.");
+
+  joystickReturnMenuDef = &recordMacroMenuDef;
+  joystickSwitchState = digitalRead(jsw);
+  joystickSwitchLastEdgeMs = millis();
+  joystickLinearFullStepEqFromStart = 0;
+  joystickRotationFullStepEqFromStart = 0;
+  stepSize(fullStep, 0);
+  stepSize(fullStep, 1);
+  currentState = STATE_JOYSTICK_CTRL;
+  drawJoystickCtrlScreen();
+  drawJoystickDebugReadout();
+}
+
+void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMode) {
+  if (!macroRecordingActive || steps == 0) {
+    return;
+  }
+
+  if (!macroNearLimitWarned) {
+    uint16_t warnStart = (MAX_MACRO_MOVES > MACRO_NEAR_LIMIT_MARGIN)
+      ? (MAX_MACRO_MOVES - MACRO_NEAR_LIMIT_MARGIN)
+      : 0;
+    if (recordedMacroCount >= warnStart) {
+      macroNearLimitWarned = true;
+      Serial.print("Warning: macro buffer almost full. Remaining slots: ");
+      Serial.println(MAX_MACRO_MOVES - recordedMacroCount);
+    }
+  }
+
+  // Merge consecutive identical moves to reduce macro entry usage.
+  if (recordedMacroCount > 0) {
+    MacroMove& lastMove = recordedMacro[recordedMacroCount - 1];
+    if (lastMove.driver == driver &&
+        lastMove.direction == direction &&
+        lastMove.stepMode == stepMode) {
+      if (lastMove.steps <= (UINT32_MAX - steps)) {
+        lastMove.steps += steps;
+        return;
+      }
+      macroRecordingOverflow = true;
+      return;
+    }
+  }
+
+  if (recordedMacroCount >= MAX_MACRO_MOVES) {
+    macroRecordingOverflow = true;
+    macroRecordingActive = false;
+    macroStopByLimitRequested = true;
+    if (!macroLimitHitLatched) {
+      macroLimitHitLatched = true;
+      Serial.print("Macro recording limit reached. Macro saved with moves: ");
+      Serial.println(recordedMacroCount);
+    }
+    return;
+  }
+
+  recordedMacro[recordedMacroCount].driver = driver;
+  recordedMacro[recordedMacroCount].direction = direction;
+  recordedMacro[recordedMacroCount].steps = steps;
+  recordedMacro[recordedMacroCount].stepMode = stepMode;
+  recordedMacroCount++;
+
+  if (recordedMacroCount >= MAX_MACRO_MOVES) {
+    macroRecordingOverflow = true;
+    macroRecordingActive = false;
+    macroStopByLimitRequested = true;
+    if (!macroLimitHitLatched) {
+      macroLimitHitLatched = true;
+      Serial.print("Macro recording limit reached. Macro saved with moves: ");
+      Serial.println(recordedMacroCount);
+    }
+  }
+}
+
+
+
 //Step a motor in a direction for i amount of steps.
-void callStep(bool driver, bool direction, uint32_t Steps) {
+void callStep(bool driver, bool direction, uint32_t Steps, uint16_t pulseDelayMs = 1) {
   if (driver)
   {
     digitalWrite(EN_2, LOW);
@@ -370,9 +425,9 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
         break;
       }
       digitalWrite(ST_2, HIGH);
-      delay(1);
+      delay(pulseDelayMs);
       digitalWrite(ST_2, LOW);
-      delay(1);
+      delay(pulseDelayMs);
     }
 
     if (linearStopRequested) {
@@ -392,9 +447,9 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
 
     for(uint32_t i = 0; i < Steps; i++) {
       digitalWrite(ST_1, HIGH);
-      delay(1);
+      delay(pulseDelayMs);
       digitalWrite(ST_1, LOW);
-      delay(1);
+      delay(pulseDelayMs);
     }
   }  
 }
@@ -620,6 +675,12 @@ void updateJoystickCtrl() {
 
   drawJoystickDebugReadout();
 
+  if (macroStopByLimitRequested) {
+    macroStopByLimitRequested = false;
+    enterMenu(joystickReturnMenuDef);
+    return;
+  }
+
   bool jsStateNow = digitalRead(jsw);
   uint32_t nowMs = millis();
   bool exitPressed = false;
@@ -729,7 +790,8 @@ void PlayMacro() {
 
     const MacroMove& move = recordedMacro[i];
     stepSize(move.stepMode, move.driver);
-    callStep(move.driver, move.direction, move.steps);
+    callStep(move.driver, move.direction, move.steps, MACRO_PLAYBACK_PULSE_DELAY_MS);
+    delay(MACRO_PLAYBACK_BETWEEN_MOVES_MS);
 
     int32_t unitsPerPulse = 16;
     switch (move.stepMode) {
