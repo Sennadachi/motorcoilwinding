@@ -5,7 +5,7 @@
 #include <EncoderButton.h>
 
 /*
-Checklist:
+? Checklist:
   TODO: Check Menus work
   TODO: check motors work and figure out directions
   TODO: Sort Joystick control out and apply expo curve for precise control 
@@ -14,7 +14,10 @@ Checklist:
   TODO: Display real values on-screen
   TODO: Set up homing feature and make zeroing function
   TODO: Set up rotation counter
-  TODO: Set up record macro feature <--
+  TODO: Set up record macro feature
+  TODO: Wind coils on motor bobbin                  <--
+  TODO: Create backup on Git before next step
+  TODO: Scoop code up into different files and reverify functions/
 
 */
 
@@ -165,13 +168,11 @@ const float LINEAR_MM_PER_FULL_STEP = 37.5f / 1880.0f;
 const float ROTATION_DEG_PER_FULL_STEP = 360.0f / 600.0f;
 const uint32_t ROTATION_RAW_UNITS_PER_REV = 600UL * 16UL;
 const uint32_t HOME_SWITCH_ISR_DEBOUNCE_US = 3000;
-const uint16_t MACRO_PLAYBACK_PULSE_DELAY_MS = 3;
-const uint16_t MACRO_PLAYBACK_BETWEEN_MOVES_MS = 8;
 const uint16_t MACRO_NEAR_LIMIT_MARGIN = 20;
 
 volatile bool linearStopRequested = false;
 volatile bool homeSwitchTriggered = false;
-volatile bool homeZ1eroRequested = false;
+volatile bool homeZeroRequested = false;
 volatile bool homingProcedureActive = false;
 volatile uint32_t homeSwitchLastIsrUs = 0;
 
@@ -408,7 +409,7 @@ void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMo
 
 
 //Step a motor in a direction for i amount of steps.
-void callStep(bool driver, bool direction, uint32_t Steps, uint16_t pulseDelayMs = 1) {
+void callStep(bool driver, bool direction, uint32_t Steps) {
   if (driver)
   {
     digitalWrite(EN_2, LOW);
@@ -425,9 +426,9 @@ void callStep(bool driver, bool direction, uint32_t Steps, uint16_t pulseDelayMs
         break;
       }
       digitalWrite(ST_2, HIGH);
-      delay(pulseDelayMs);
+      delay(1);
       digitalWrite(ST_2, LOW);
-      delay(pulseDelayMs);
+      delay(1);
     }
 
     if (linearStopRequested) {
@@ -447,9 +448,9 @@ void callStep(bool driver, bool direction, uint32_t Steps, uint16_t pulseDelayMs
 
     for(uint32_t i = 0; i < Steps; i++) {
       digitalWrite(ST_1, HIGH);
-      delay(pulseDelayMs);
+      delay(1);
       digitalWrite(ST_1, LOW);
-      delay(pulseDelayMs);
+      delay(1);
     }
   }  
 }
@@ -790,8 +791,7 @@ void PlayMacro() {
 
     const MacroMove& move = recordedMacro[i];
     stepSize(move.stepMode, move.driver);
-    callStep(move.driver, move.direction, move.steps, MACRO_PLAYBACK_PULSE_DELAY_MS);
-    delay(MACRO_PLAYBACK_BETWEEN_MOVES_MS);
+    callStep(move.driver, move.direction, move.steps);
 
     int32_t unitsPerPulse = 16;
     switch (move.stepMode) {
