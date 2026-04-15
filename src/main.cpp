@@ -6,18 +6,21 @@
 
 /*
 ? Checklist:
-  TODO: Check Menus work
-  TODO: check motors work and figure out directions
-  TODO: Sort Joystick control out and apply expo curve for precise control 
-  TODO: Figure out linear distance vs raw motor input 1880 steps = 37.5mm
-  TODO: Figure out Rotation degrees vs raw rotation 600 = 360 degrees
-  TODO: Display real values on-screen
-  TODO: Set up homing feature and make zeroing function
-  TODO: Set up rotation counter
-  TODO: Set up record macro feature
-  TODO: Wind coils on motor bobbin                  <--
-  TODO: Create backup on Git before next step
-  TODO: Scoop code up into different files and reverify functions/
+  ! = DONE
+  TODO: = DO
+  <-- = what stage we are on
+
+  !: Check Menus work
+  !: check motors work and figure out directions
+  !: Sort Joystick control out and apply expo curve for precise control 
+  !: Figure out linear distance vs raw motor input 1880 steps = 37.5mm
+  !: Figure out Rotation degrees vs raw rotation 600 = 360 degrees
+  !: Display real values on-screen
+  !: Set up homing feature and make zeroing function
+  !: Set up rotation counter
+  !: Set up record macro feature
+  !: Wind coils on motor bobbin       
+  TODO: Print macromove structs used in macro recording <--          
 
 */
 
@@ -168,6 +171,7 @@ const float LINEAR_MM_PER_FULL_STEP = 37.5f / 1880.0f;
 const float ROTATION_DEG_PER_FULL_STEP = 360.0f / 600.0f;
 const uint32_t ROTATION_RAW_UNITS_PER_REV = 600UL * 16UL;
 const uint32_t HOME_SWITCH_ISR_DEBOUNCE_US = 3000;
+const uint16_t HOME_BACKOFF_STEPS = 120;
 const uint16_t MACRO_NEAR_LIMIT_MARGIN = 20;
 
 volatile bool linearStopRequested = false;
@@ -332,6 +336,10 @@ void beginMacroRecording() {
   macroLimitHitLatched = false;
   macroStopByLimitRequested = false;
   Serial.println("Macro recording started. Use joystick, then press joystick button to stop.");
+  Serial.print("MacroMove structs used: ");
+  Serial.print(recordedMacroCount);
+  Serial.print("/");
+  Serial.println(MAX_MACRO_MOVES);
 
   joystickReturnMenuDef = &recordMacroMenuDef;
   joystickSwitchState = digitalRead(jsw);
@@ -393,6 +401,11 @@ void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMo
   recordedMacro[recordedMacroCount].steps = steps;
   recordedMacro[recordedMacroCount].stepMode = stepMode;
   recordedMacroCount++;
+
+  Serial.print("MacroMove structs used: ");
+  Serial.print(recordedMacroCount);
+  Serial.print("/");
+  Serial.println(MAX_MACRO_MOVES);
 
   if (recordedMacroCount >= MAX_MACRO_MOVES) {
     macroRecordingOverflow = true;
@@ -516,6 +529,14 @@ void HomeAxis(){
       break;
     }
     callStep(1, 1, 1);
+  }
+
+  // If homing hit the switch, back off so the axis does not stay pressed on the limit.
+  if (homeSwitchTriggered) {
+    noInterrupts();
+    linearStopRequested = false;
+    interrupts();
+    callStep(1, 0, HOME_BACKOFF_STEPS);
   }
 
   noInterrupts();
@@ -705,6 +726,10 @@ void updateJoystickCtrl() {
         Serial.print("Macro recording stopped. Moves saved: ");
       }
       Serial.println(recordedMacroCount);
+      Serial.print("MacroMove structs used at stop: ");
+      Serial.print(recordedMacroCount);
+      Serial.print("/");
+      Serial.println(MAX_MACRO_MOVES);
     }
     enterMenu(joystickReturnMenuDef);
   }
