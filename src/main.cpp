@@ -5,15 +5,22 @@
 #include <EncoderButton.h>
 
 /*
-Checklist:
-  TODO: Check Menus work
-  TODO: check motors work and figure out directions
-  TODO: Sort Joystick control out and apply expo curve for precise control 
-  TODO: Figure out linear distance vs raw motor input 1880 steps = 37.5mm
-  TODO: Figure out Rotation degrees vs raw rotation 600 = 360 degrees
-  TODO: Display real values on-screen
-  TODO: Set up homing feature and make zeroing function
-  TODO: Set up record macro feature
+? Checklist:
+  ! = DONE
+  TODO: = DO
+  <-- = what stage we are on
+
+  !: Check Menus work
+  !: check motors work and figure out directions
+  !: Sort Joystick control out and apply expo curve for precise control 
+  !: Figure out linear distance vs raw motor input 1880 steps = 37.5mm
+  !: Figure out Rotation degrees vs raw rotation 600 = 360 degrees
+  !: Display real values on-screen
+  !: Set up homing feature and make zeroing function
+  !: Set up rotation counter
+  !: Set up record macro feature
+  !: Wind coils on motor bobbin       
+  TODO: Print macromove structs used in macro recording <--          
 
 */
 
@@ -99,11 +106,13 @@ void actionGoBack();
 void HomeAxis();
 void RecordMacroMenu();
 void PlayMacro();
+void beginMacroRecording();
+void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMode);
 
 MenuItem mainMenu[] = {
   {"Home Axis", actionHomeAxis},
   {"Axes Control", actionOpenManualMenu},
-  {"Record Macro", actionRecordMacro},
+  {"Macros", actionRecordMacro},
   {"Test Motors", actionTestMotors}
 };
 
@@ -151,6 +160,8 @@ int32_t linearDistanceRaw = 0;
 float linearDistanceMM = 0;
 int32_t rotationDistanceRaw = 0;
 int16_t rotationDistance = 0;
+uint32_t rotationTurnCount = 0;
+uint32_t rotationAbsRemainderRaw = 0;
 int32_t joystickLinearFullStepEqFromStart = 0;
 int32_t joystickRotationFullStepEqFromStart = 0;
 bool joystickSwitchState = HIGH;
@@ -158,6 +169,36 @@ uint32_t joystickSwitchLastEdgeMs = 0;
 const uint16_t JOY_SWITCH_DEBOUNCE_MS = 40;
 const float LINEAR_MM_PER_FULL_STEP = 37.5f / 1880.0f;
 const float ROTATION_DEG_PER_FULL_STEP = 360.0f / 600.0f;
+const uint32_t ROTATION_RAW_UNITS_PER_REV = 600UL * 16UL;
+const uint32_t HOME_SWITCH_ISR_DEBOUNCE_US = 3000;
+const uint16_t HOME_BACKOFF_STEPS = 120;
+const uint16_t MACRO_NEAR_LIMIT_MARGIN = 20;
+
+volatile bool linearStopRequested = false;
+volatile bool homeSwitchTriggered = false;
+volatile bool homeZeroRequested = false;
+volatile bool homingProcedureActive = false;
+volatile uint32_t homeSwitchLastIsrUs = 0;
+
+const uint16_t MAX_MACRO_MOVES = 600;
+
+struct MacroMove {
+  bool driver;
+  bool direction;
+  uint32_t steps;
+  uint8_t stepMode;
+};
+
+MacroMove recordedMacro[MAX_MACRO_MOVES];
+uint16_t recordedMacroCount = 0;
+bool macroRecordingActive = false;
+bool macroRecordingOverflow = false;
+bool macroNearLimitWarned = false;
+bool macroLimitHitLatched = false;
+bool macroStopByLimitRequested = false;
+
+void onHomeSwitchChange();
+void processHomeSwitchEvents();
 
 void onEb1Clicked(EncoderButton& eb) {
   menuPressed = true;  // caller checks this flag to act on the selected item
@@ -177,7 +218,42 @@ void onEb1Encoder(EncoderButton& eb) {
   }
 }
 
-//Set step size for 
+void onHomeSwitchChange() {
+  uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - homeSwitchLastIsrUs) < HOME_SWITCH_ISR_DEBOUNCE_US) {
+    return;
+  }
+
+  if (digitalRead(HOMESWITCH) == LOW) {
+    homeSwitchLastIsrUs = nowUs;
+    homeSwitchTriggered = true;
+    linearStopRequested = true;
+    if (homingProcedureActive) {
+      homeZeroRequested = true;
+    }
+  }
+}
+
+void processHomeSwitchEvents() {
+  bool doZero = false;
+
+  noInterrupts();
+  if (homeZeroRequested) {
+    homeZeroRequested = false;
+    doZero = true;
+  }
+  interrupts();
+
+  if (doZero) {
+    joystickLinearFullStepEqFromStart = 0;
+    linearDistanceRaw = 0;
+    linearDistanceMM = 0.0f;
+    isHomed = true;
+    Serial.println("Home switch hit during homing. Linear position set to zero.");
+  }
+}
+
+//Set step size for motor drivers
 void stepSize(uint8_t stepSize, bool driver) {
   switch (stepSize)
   {
@@ -252,6 +328,99 @@ void stepSize(uint8_t stepSize, bool driver) {
   }
 }
 
+void beginMacroRecording() {
+  recordedMacroCount = 0;
+  macroRecordingOverflow = false;
+  macroRecordingActive = true;
+  macroNearLimitWarned = false;
+  macroLimitHitLatched = false;
+  macroStopByLimitRequested = false;
+  Serial.println("Macro recording started. Use joystick, then press joystick button to stop.");
+  Serial.print("MacroMove structs used: ");
+  Serial.print(recordedMacroCount);
+  Serial.print("/");
+  Serial.println(MAX_MACRO_MOVES);
+
+  joystickReturnMenuDef = &recordMacroMenuDef;
+  joystickSwitchState = digitalRead(jsw);
+  joystickSwitchLastEdgeMs = millis();
+  joystickLinearFullStepEqFromStart = 0;
+  joystickRotationFullStepEqFromStart = 0;
+  stepSize(fullStep, 0);
+  stepSize(fullStep, 1);
+  currentState = STATE_JOYSTICK_CTRL;
+  drawJoystickCtrlScreen();
+  drawJoystickDebugReadout();
+}
+
+void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMode) {
+  if (!macroRecordingActive || steps == 0) {
+    return;
+  }
+
+  if (!macroNearLimitWarned) {
+    uint16_t warnStart = (MAX_MACRO_MOVES > MACRO_NEAR_LIMIT_MARGIN)
+      ? (MAX_MACRO_MOVES - MACRO_NEAR_LIMIT_MARGIN)
+      : 0;
+    if (recordedMacroCount >= warnStart) {
+      macroNearLimitWarned = true;
+      Serial.print("Warning: macro buffer almost full. Remaining slots: ");
+      Serial.println(MAX_MACRO_MOVES - recordedMacroCount);
+    }
+  }
+
+  // Merge consecutive identical moves to reduce macro entry usage.
+  if (recordedMacroCount > 0) {
+    MacroMove& lastMove = recordedMacro[recordedMacroCount - 1];
+    if (lastMove.driver == driver &&
+        lastMove.direction == direction &&
+        lastMove.stepMode == stepMode) {
+      if (lastMove.steps <= (UINT32_MAX - steps)) {
+        lastMove.steps += steps;
+        return;
+      }
+      macroRecordingOverflow = true;
+      return;
+    }
+  }
+
+  if (recordedMacroCount >= MAX_MACRO_MOVES) {
+    macroRecordingOverflow = true;
+    macroRecordingActive = false;
+    macroStopByLimitRequested = true;
+    if (!macroLimitHitLatched) {
+      macroLimitHitLatched = true;
+      Serial.print("Macro recording limit reached. Macro saved with moves: ");
+      Serial.println(recordedMacroCount);
+    }
+    return;
+  }
+
+  recordedMacro[recordedMacroCount].driver = driver;
+  recordedMacro[recordedMacroCount].direction = direction;
+  recordedMacro[recordedMacroCount].steps = steps;
+  recordedMacro[recordedMacroCount].stepMode = stepMode;
+  recordedMacroCount++;
+
+  Serial.print("MacroMove structs used: ");
+  Serial.print(recordedMacroCount);
+  Serial.print("/");
+  Serial.println(MAX_MACRO_MOVES);
+
+  if (recordedMacroCount >= MAX_MACRO_MOVES) {
+    macroRecordingOverflow = true;
+    macroRecordingActive = false;
+    macroStopByLimitRequested = true;
+    if (!macroLimitHitLatched) {
+      macroLimitHitLatched = true;
+      Serial.print("Macro recording limit reached. Macro saved with moves: ");
+      Serial.println(recordedMacroCount);
+    }
+  }
+}
+
+
+
 //Step a motor in a direction for i amount of steps.
 void callStep(bool driver, bool direction, uint32_t Steps) {
   if (driver)
@@ -266,10 +435,17 @@ void callStep(bool driver, bool direction, uint32_t Steps) {
     }
 
     for(uint32_t i = 0; i < Steps; i++) {
+      if (linearStopRequested) {
+        break;
+      }
       digitalWrite(ST_2, HIGH);
       delay(1);
       digitalWrite(ST_2, LOW);
       delay(1);
+    }
+
+    if (linearStopRequested) {
+      digitalWrite(EN_2, HIGH);
     }
   }
   else
@@ -330,9 +506,45 @@ MenuItem createBackMenuItem() {
 }
 
 void HomeAxis(){
-  //move linear in opposite direction for a few steps, then move towards home until it hits the interrupt homing microswitch.
-  stepSize(fullStep, 1); //not sure on driver number yet
-  callStep(1,0,100); //not sure on driver or direction yet
+  // Move off the switch slightly, then move towards home until ISR requests stop.
+  noInterrupts();
+  homingProcedureActive = true;
+  linearStopRequested = false;
+  homeSwitchTriggered = false;
+  homeZeroRequested = false;
+  interrupts();
+
+  // Reset rotation turn count when homing is requested.
+  rotationTurnCount = 0;
+  rotationAbsRemainderRaw = 0;
+
+  stepSize(fullStep, 1);
+
+  // Back off first.
+  callStep(1, 0, 100);
+
+  // Seek home switch and stop immediately when ISR latches LOW.
+  for (uint32_t i = 0; i < 60000; i++) {
+    if (linearStopRequested) {
+      break;
+    }
+    callStep(1, 1, 1);
+  }
+
+  // If homing hit the switch, back off so the axis does not stay pressed on the limit.
+  if (homeSwitchTriggered) {
+    noInterrupts();
+    linearStopRequested = false;
+    interrupts();
+    callStep(1, 0, HOME_BACKOFF_STEPS);
+  }
+
+  noInterrupts();
+  homingProcedureActive = false;
+  linearStopRequested = false;
+  interrupts();
+
+  processHomeSwitchEvents();
 }
 
 void drawJoystickCtrlScreen() {
@@ -345,20 +557,27 @@ void drawJoystickCtrlScreen() {
   display.print(F("Joystick Ctrl"));
 
   display.setTextColor(SSD1306_WHITE);
+  if (macroRecordingActive) {
+    display.setCursor(8, 20);
+    display.print(F("REC"));
+  }
   display.setCursor(8, 56);
   display.print(F("Press Joy to exit"));
   display.display();
 }
 
 void drawJoystickDebugReadout() {
-  display.fillRect(8, 24, 112, 28, SSD1306_BLACK);
+  display.fillRect(8, 22, 112, 34, SSD1306_BLACK);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(8, 26);
+  display.setCursor(8, 24);
   display.print(F("Lin mm: "));
   display.print(linearDistanceMM, 2);
-  display.setCursor(8, 40);
+  display.setCursor(8, 36);
   display.print(F("Rot deg: "));
   display.print(rotationDistance);
+  display.setCursor(8, 48);
+  display.print(F("Rot cnt: "));
+  display.print(rotationTurnCount);
   display.display();
 }
 
@@ -440,9 +659,11 @@ void updateJoystickCtrl() {
   if (linearSteps > 0) {
     stepSize(linearMode, 1);
     if (xOffset < 0) {
+      recordMacroMove(1, 0, linearSteps, linearMode);
       callStep(1, 0, linearSteps);
       joystickLinearFullStepEqFromStart += ((int32_t)linearSteps * linearUnitsPerPulse);
     } else {
+      recordMacroMove(1, 1, linearSteps, linearMode);
       callStep(1, 1, linearSteps);
       joystickLinearFullStepEqFromStart -= ((int32_t)linearSteps * linearUnitsPerPulse);
     }
@@ -451,10 +672,19 @@ void updateJoystickCtrl() {
   // Joy Y: toward 0 => anticlockwise, toward 1024 => clockwise.
   if (rotationSteps > 0) {
     stepSize(rotationMode, 0);
+    uint32_t rotationDeltaAbsRaw = (uint32_t)rotationSteps * (uint32_t)rotationUnitsPerPulse;
+    rotationAbsRemainderRaw += rotationDeltaAbsRaw;
+    while (rotationAbsRemainderRaw >= ROTATION_RAW_UNITS_PER_REV) {
+      rotationAbsRemainderRaw -= ROTATION_RAW_UNITS_PER_REV;
+      rotationTurnCount++;
+    }
+
     if (yOffset < 0) {
+      recordMacroMove(0, 0, rotationSteps, rotationMode);
       callStep(0, 0, rotationSteps);
       joystickRotationFullStepEqFromStart += ((int32_t)rotationSteps * rotationUnitsPerPulse);
     } else {
+      recordMacroMove(0, 1, rotationSteps, rotationMode);
       callStep(0, 1, rotationSteps);
       joystickRotationFullStepEqFromStart -= ((int32_t)rotationSteps * rotationUnitsPerPulse);
     }
@@ -466,6 +696,12 @@ void updateJoystickCtrl() {
   rotationDistance = rawRotationToDegrees(rotationDistanceRaw);
 
   drawJoystickDebugReadout();
+
+  if (macroStopByLimitRequested) {
+    macroStopByLimitRequested = false;
+    enterMenu(joystickReturnMenuDef);
+    return;
+  }
 
   bool jsStateNow = digitalRead(jsw);
   uint32_t nowMs = millis();
@@ -482,6 +718,19 @@ void updateJoystickCtrl() {
   }
 
   if (exitPressed) {
+    if (macroRecordingActive) {
+      macroRecordingActive = false;
+      if (macroRecordingOverflow) {
+        Serial.print("Macro recording stopped (buffer full). Moves saved: ");
+      } else {
+        Serial.print("Macro recording stopped. Moves saved: ");
+      }
+      Serial.println(recordedMacroCount);
+      Serial.print("MacroMove structs used at stop: ");
+      Serial.print(recordedMacroCount);
+      Serial.print("/");
+      Serial.println(MAX_MACRO_MOVES);
+    }
     enterMenu(joystickReturnMenuDef);
   }
 }
@@ -542,11 +791,73 @@ void actionGoBack() {
 
 
 void RecordMacroMenu() {
-  Serial.println("Start macro recording requested");
+  beginMacroRecording();
 }
 
 void PlayMacro() {
-  Serial.println("Play macro requested");
+  if (macroRecordingActive) {
+    Serial.println("Cannot play while recording is active.");
+    return;
+  }
+
+  if (recordedMacroCount == 0) {
+    Serial.println("No recorded macro to play.");
+    return;
+  }
+
+  Serial.print("Playing macro. Moves: ");
+  Serial.println(recordedMacroCount);
+
+  for (uint16_t i = 0; i < recordedMacroCount; i++) {
+    if (linearStopRequested) {
+      Serial.println("Macro playback stopped by home switch event.");
+      break;
+    }
+
+    const MacroMove& move = recordedMacro[i];
+    stepSize(move.stepMode, move.driver);
+    callStep(move.driver, move.direction, move.steps);
+
+    int32_t unitsPerPulse = 16;
+    switch (move.stepMode) {
+      case fullStep: unitsPerPulse = 16; break;
+      case halfStep: unitsPerPulse = 8; break;
+      case quarterStep: unitsPerPulse = 4; break;
+      case eightStep: unitsPerPulse = 2; break;
+      case sixteenthStep: unitsPerPulse = 1; break;
+      default: unitsPerPulse = 16; break;
+    }
+
+    int32_t deltaRaw = (int32_t)move.steps * unitsPerPulse;
+
+    if (move.driver) {
+      if (move.direction == 0) {
+        joystickLinearFullStepEqFromStart += deltaRaw;
+      } else {
+        joystickLinearFullStepEqFromStart -= deltaRaw;
+      }
+    } else {
+      uint32_t rotationDeltaAbsRaw = (uint32_t)deltaRaw;
+      rotationAbsRemainderRaw += rotationDeltaAbsRaw;
+      while (rotationAbsRemainderRaw >= ROTATION_RAW_UNITS_PER_REV) {
+        rotationAbsRemainderRaw -= ROTATION_RAW_UNITS_PER_REV;
+        rotationTurnCount++;
+      }
+
+      if (move.direction == 0) {
+        joystickRotationFullStepEqFromStart += deltaRaw;
+      } else {
+        joystickRotationFullStepEqFromStart -= deltaRaw;
+      }
+    }
+  }
+
+  linearDistanceRaw = joystickLinearFullStepEqFromStart;
+  rotationDistanceRaw = joystickRotationFullStepEqFromStart;
+  linearDistanceMM = rawLinearToMM(linearDistanceRaw);
+  rotationDistance = rawRotationToDegrees(rotationDistanceRaw);
+
+  Serial.println("Macro playback finished.");
 }
 
 void setup() {
@@ -571,6 +882,7 @@ void setup() {
   delay(100);
   eb1.setClickHandler(onEb1Clicked);
   eb1.setEncoderHandler(onEb1Encoder);
+  attachInterrupt(digitalPinToInterrupt(HOMESWITCH), onHomeSwitchChange, CHANGE);
   joystickSwitchState = digitalRead(jsw);
   joystickSwitchLastEdgeMs = millis();
 
@@ -584,6 +896,7 @@ void setup() {
 
 
 void loop() {
+  processHomeSwitchEvents();
   eb1.update();
 
   if (currentState == STATE_JOYSTICK_CTRL) {
