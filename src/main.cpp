@@ -336,10 +336,6 @@ void beginMacroRecording() {
   macroLimitHitLatched = false;
   macroStopByLimitRequested = false;
   Serial.println("Macro recording started. Use joystick, then press joystick button to stop.");
-  Serial.print("MacroMove structs used: ");
-  Serial.print(recordedMacroCount);
-  Serial.print("/");
-  Serial.println(MAX_MACRO_MOVES);
 
   joystickReturnMenuDef = &recordMacroMenuDef;
   joystickSwitchState = digitalRead(jsw);
@@ -402,7 +398,7 @@ void recordMacroMove(bool driver, bool direction, uint32_t steps, uint8_t stepMo
   recordedMacro[recordedMacroCount].stepMode = stepMode;
   recordedMacroCount++;
 
-  Serial.print("MacroMove structs used: ");
+  Serial.print("New MacroMove packet created. Used: ");
   Serial.print(recordedMacroCount);
   Serial.print("/");
   Serial.println(MAX_MACRO_MOVES);
