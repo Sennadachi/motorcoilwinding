@@ -811,8 +811,6 @@ void PlayMacro() {
     }
 
     const MacroMove& move = recordedMacro[i];
-    stepSize(move.stepMode, move.driver);
-    callStep(move.driver, move.direction, move.steps);
 
     int32_t unitsPerPulse = 16;
     switch (move.stepMode) {
@@ -823,6 +821,18 @@ void PlayMacro() {
       case sixteenthStep: unitsPerPulse = 1; break;
       default: unitsPerPulse = 16; break;
     }
+
+    uint32_t playbackSteps = move.steps;
+    uint8_t playbackStepMode = move.stepMode;
+
+    // Keep MacroMove storage unchanged; normalize rotational playback to sixteenth-step only.
+    if (!move.driver) {
+      playbackStepMode = sixteenthStep;
+      playbackSteps = (uint32_t)move.steps * (uint32_t)unitsPerPulse;
+    }
+
+    stepSize(playbackStepMode, move.driver);
+    callStep(move.driver, move.direction, playbackSteps);
 
     int32_t deltaRaw = (int32_t)move.steps * unitsPerPulse;
 
